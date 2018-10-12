@@ -44,7 +44,7 @@ def print_status():
     if latest is not None:
         date = datetime.datetime.strptime(latest['date'], '%Y-%m-%dT%H:%M:%SZ')
         print('Data received ' + FMT_BOLD + str(date) + FMT_CLEAR)
-        print('IR Opacity: ' + FMT_BOLD + '{0:.0f}%'.format(latest['opacity'] * 100) + FMT_CLEAR)
+        print('IR Opacity: ' + FMT_BOLD + '{0:.0f}%'.format(latest['opacity']) + FMT_CLEAR)
         print()
     else:
         print('error: no data available')

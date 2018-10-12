@@ -1,5 +1,5 @@
 Name:      observatory-eumetsat-client
-Version:   1.0.0
+Version:   1.0.1
 Release:   0
 Url:       https://github.com/warwick-one-metre/eumetsatd
 Summary:   EUMETSAT client for the Warwick La Palma telescopes

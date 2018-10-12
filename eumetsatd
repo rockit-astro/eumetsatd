@@ -115,8 +115,8 @@ class EumetsatDaemon:
         thumb_grey = np.mean(thumb, axis=2)
 
         with self._lock:
-            # Median intensity is normalized between 0 and 1
-            self._last_measurement = round(np.median(thumb_grey[mask]) / 255., 2)
+            # Median intensity is normalized between 0 and 100 percent
+            self._last_measurement = round(np.median(thumb_grey[mask]) / 2.55)
             self._last_measurement_date = date
 
     def __poll_data(self):
