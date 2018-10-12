@@ -6,7 +6,8 @@ Summary:   Estimates the IR opacity from the Eumetsat image published by sat24.c
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python34, python34-Pyro4, python34-numpy, python34-scipy, python34-pytesseract, tesseract, python34-warwick-observatory-common, observatory-log-client, %{?systemd_requires}
+Requires:  python34, python34-Pyro4, python34-numpy, python34-scipy, python34-pytesseract, python34-Pillow, python34-warwick-observatory-common
+Requires:  tesseract, observatory-log-client, %{?systemd_requires}
 
 %description
 Part of the observatory software for the Warwick La Palma telescopes.
