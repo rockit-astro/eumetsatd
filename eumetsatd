@@ -1,0 +1,145 @@
+#!/usr/bin/env python3
+#
+# This file is part of eumetsatd.
+#
+# eumetsatd is free software: you can redistribute it and/or modify
+# it under the terms of the GNU General Public License as published by
+# the Free Software Foundation, either version 3 of the License, or
+# (at your option) any later version.
+#
+# eumetsatd is distributed in the hope that it will be useful,
+# but WITHOUT ANY WARRANTY; without even the implied warranty of
+# MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+# GNU General Public License for more details.
+#
+# You should have received a copy of the GNU General Public License
+# along with eumetsatd.  If not, see <http://www.gnu.org/licenses/>.
+
+"""Estimates the IR opacity from the Eumetsat image published by sat24.com"""
+
+import datetime
+import hashlib
+import io
+import re
+import sys
+import threading
+import time
+import traceback
+import urllib.request
+import numpy as np
+from PIL import Image
+import Pyro4
+import pytesseract
+from scipy.ndimage.morphology import binary_erosion, generate_binary_structure
+from warwick.observatory.common import daemons, log
+
+# pylint: disable=broad-except
+# pylint: disable=too-few-public-methods
+
+# Set automatically when generating RPM package
+SOFTWARE_VERSION = 'UNKNOWN'
+
+IMAGE_URL = 'https://en.sat24.com/image?type=infraPolair&region=ce'
+IMAGE_QUERY_TIMEOUT = 5
+LOOP_DELAY = 300
+
+
+class EumetsatDaemon:
+    """Estimates the IR opacity from the Eumetsat image published by sat24.com"""
+
+    def __init__(self):
+        self._time_regex = re.compile(r'(?P<hour>\d{2}):(?P<minutes>\d{2})')
+        self._binary_structure = generate_binary_structure(2, 1)
+        self._lock = threading.Lock()
+
+        self._last_sha1 = None
+        self._last_measurement = 0
+        self._last_measurement_date = datetime.datetime.min
+
+        runloop = threading.Thread(target=self.__poll_data)
+        runloop.daemon = True
+        runloop.start()
+
+    def __extract_datetime(self, image):
+        """Extract the time from a Sat24 image using OCR and estimate the date"""
+        # Extract thumbnail around the timestamp and convert to a binary mask to increase contrast
+        time_greyscale = np.mean(image[-29:-9, 125:177], axis=2)
+        time_binary = (time_greyscale > 192).astype(np.uint8)
+
+        # Extract the time using OCR
+        time_string = pytesseract.image_to_string(time_binary)
+
+        match = self._time_regex.match(time_string)
+        if not match:
+            print('Failed to parse time from extracted string:', time_string)
+            observatory.log.error('iropacityd', 'Failed to parse time from extracted string: ' +
+                                  time_string)
+            return None
+
+        # Guess the date as today
+        now = datetime.datetime.utcnow()
+        date_string = now.strftime('%Y-%m-%d') + 'T{0}:{1}:00Z'.format(match.group('hour'),
+                                                                       match.group('minutes'))
+        date_estimate = datetime.datetime.strptime(date_string, '%Y-%m-%dT%H:%M:%SZ')
+
+        # Adjust date until the delta is less than half a day
+        while (date_estimate - now).total_seconds() > 43200:
+            date_estimate += datetime.timedelta(hours=24)
+
+        while (now - date_estimate).total_seconds() > 43200:
+            date_estimate -= datetime.timedelta(hours=24)
+
+        return date_estimate
+
+    def __update_measurement(self):
+        """Download the latest Sat24 image and update the opacity measurement if it has changed"""
+        with urllib.request.urlopen(IMAGE_URL) as url:
+            image = np.array(Image.open(io.BytesIO((url.read()))))
+            image_sha1 = hashlib.sha1(image).hexdigest()
+            if image_sha1 == self._last_sha1:
+                return
+
+            self._last_sha1 = image_sha1
+
+        date = self.__extract_datetime(image)
+        if date is None:
+            return
+
+        thumb = image[200:231, 303:334]
+
+        # Mask pixels with (or next to) large differences between the color channels
+        # Clouds are ~grey, coastline is strongly yellow
+        mask = binary_erosion(np.std(thumb, axis=2) < 20, structure=self._binary_structure)
+
+        # Convert to greyscale by averaging the color channels
+        thumb_grey = np.mean(thumb, axis=2)
+
+        with self._lock:
+            # Median intensity is normalized between 0 and 1
+            self._last_measurement = round(np.median(thumb_grey[mask]) / 255., 2)
+            self._last_measurement_date = date
+
+    def __poll_data(self):
+        """Main run loop"""
+        while True:
+            try:
+                self.__update_measurement()
+            except Exception:
+                print('Failed to parse EUMETSAT image')
+                traceback.print_exc(file=sys.stdout)
+                log.error('iropacityd', 'Failed to parse EUMETSAT image')
+            time.sleep(LOOP_DELAY)
+
+    @Pyro4.expose
+    def last_measurement(self):
+        """Query the latest valid measurement. May return None if no data is available"""
+        with self._lock:
+            return {
+                'date': self._last_measurement_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'opacity': self._last_measurement,
+                'software_version': SOFTWARE_VERSION
+            }
+
+
+if __name__ == '__main__':
+    daemons.eumetsat_opacity.launch(EumetsatDaemon())
