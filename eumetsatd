@@ -72,8 +72,7 @@ class EumetsatDaemon:
         match = self._time_regex.match(time_string)
         if not match:
             print('Failed to parse time from extracted string:', time_string)
-            observatory.log.error('iropacityd', 'Failed to parse time from extracted string: ' +
-                                  time_string)
+            log.error('iropacityd', 'Failed to parse time from extracted string: ' + time_string)
             return None
 
         # Guess the date as today
