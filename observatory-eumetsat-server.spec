@@ -1,5 +1,5 @@
 Name:      observatory-eumetsat-server
-Version:   1.1.0
+Version:   1.2.0
 Release:   0
 Url:       https://github.com/warwick-one-metre/eumetsatd
 Summary:   Estimates the IR opacity from the Eumetsat image published by sat24.com

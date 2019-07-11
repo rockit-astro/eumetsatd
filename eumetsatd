@@ -26,6 +26,7 @@ import threading
 import time
 import traceback
 import urllib.request
+import zipfile
 import numpy as np
 from PIL import Image
 import Pyro4
@@ -39,6 +40,14 @@ from warwick.observatory.common import daemons, log
 # Set automatically when generating RPM package
 SOFTWARE_VERSION = 'UNKNOWN'
 
+SOURCE_OUTPUT_FORMAT = '/srv/dashboard/generated/eumetsat-{0}.jpg'
+SOURCE_URL_FORMAT = 'https://eumetview.eumetsat.int/static-images/MSG/{0}/WESTERNAFRICA/IMAGESDisplay/2Frames{1}-WESTERNAFRICA.zip'
+SOURCES = {
+    'ir': ('IMAGERY/IR108/BW', 'IR108'),
+    'dust': ('RGB/DUST', 'DUST')
+}
+
+# TODO: Measure opacity from the EUMETSAT image directly!
 IMAGE_URL = 'https://en.sat24.com/image?type=infraPolair&region=ce'
 IMAGE_QUERY_TIMEOUT = 5
 LOOP_DELAY = 300
@@ -56,9 +65,35 @@ class EumetsatDaemon:
         self._last_measurement = 0
         self._last_measurement_date = datetime.datetime.min
 
+        self._last_source_images = {s: '' for s in SOURCES}
+
         runloop = threading.Thread(target=self.__poll_data)
         runloop.daemon = True
         runloop.start()
+
+    def __update_source_image(self, source):
+        """Check for a new satellite image/product and update the local cropped cache if it has changed
+            :param source: key to the SOURCES dictionary defining the image type
+        """
+        source_url = SOURCE_URL_FORMAT.format(SOURCES[source][0], SOURCES[source][1])
+        with urllib.request.urlopen(source_url) as url:
+            archive = zipfile.ZipFile(io.BytesIO((url.read())))
+            latest_filename = sorted(archive.namelist())[-1]
+            if latest_filename <= self._last_source_images[source]:
+                return
+
+            latest_image = Image.open(io.BytesIO(archive.read(latest_filename)))
+            crop = latest_image.crop((0, 0, 800, 650))
+
+            # Watermark
+            crop.paste(latest_image.crop((0, 1108, 260, 1148)), (0, 610, 260, 650))
+
+            # Data
+            crop.paste(latest_image.crop((908, 1108, 1448, 1148)), (260, 610, 800, 650))
+
+            output_path = SOURCE_OUTPUT_FORMAT.format(source)
+            crop.save(output_path, 'JPEG', quality=80, optimize=True, progressive=True, clobber=True)
+            self._last_source_images[source] = latest_filename
 
     def __extract_datetime(self, image):
         """Extract the time from a Sat24 image using OCR and estimate the date"""
@@ -127,6 +162,15 @@ class EumetsatDaemon:
                 print('Failed to parse EUMETSAT image')
                 traceback.print_exc(file=sys.stdout)
                 log.error('iropacityd', 'Failed to parse EUMETSAT image')
+
+            for s in SOURCES:
+                try:
+                    self.__update_source_image(s)
+                except Exception:
+                    print('Failed to parse EUMETSAT image for source', s)
+                    traceback.print_exc(file=sys.stdout)
+                    log.error('iropacityd', 'Failed to parse EUMETSAT image for source ' + s)
+
             time.sleep(LOOP_DELAY)
 
     @Pyro4.expose
