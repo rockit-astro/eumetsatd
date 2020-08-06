@@ -1,13 +1,13 @@
 Name:      observatory-eumetsat-server
-Version:   1.2.0
+Version:   1.2.2
 Release:   0
 Url:       https://github.com/warwick-one-metre/eumetsatd
 Summary:   Estimates the IR opacity from the Eumetsat image published by sat24.com
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python36, python36-Pyro4, python36-numpy, python36-scipy, python36-pytesseract
-Requires:  python36-Pillow, python36-warwick-observatory-common
+Requires:  python3, python3-Pyro4, python3-numpy, python3-scipy, python3-pytesseract
+Requires:  python3-pillow, python3-warwick-observatory-common
 Requires:  tesseract, observatory-log-client, %{?systemd_requires}
 
 %description
