@@ -15,24 +15,20 @@
 # You should have received a copy of the GNU General Public License
 # along with eumetsatd.  If not, see <http://www.gnu.org/licenses/>.
 
-"""Estimates the IR opacity from the Eumetsat image published by sat24.com"""
+"""Creates IR and dust maps for the web dashboard and estimates the IR opacity from EUMETSAT images"""
 
 import datetime
-import hashlib
-import io
+from io import BytesIO
 import re
 import sys
 import threading
 import time
 import traceback
-import urllib.request
-import zipfile
 import numpy as np
 from PIL import Image
 import Pyro4
-import pytesseract
-from scipy.ndimage.morphology import binary_erosion, generate_binary_structure
-from warwick.observatory.common import daemons, log
+import requests
+from warwick.observatory.common import daemons
 
 # pylint: disable=broad-except
 # pylint: disable=too-few-public-methods
@@ -41,135 +37,145 @@ from warwick.observatory.common import daemons, log
 SOFTWARE_VERSION = 'UNKNOWN'
 
 SOURCE_OUTPUT_FORMAT = '/srv/dashboard/generated/eumetsat-{0}.jpg'
-SOURCE_URL_FORMAT = 'https://eumetview.eumetsat.int/static-images/MSG/{0}/WESTERNAFRICA/IMAGESDisplay/2Frames{1}-WESTERNAFRICA.zip'
+SOURCE_URL_FORMAT = 'https://eumetview.eumetsat.int/static-images/MSG/{0}/WESTERNAFRICA/'
 SOURCES = {
-    'ir': ('IMAGERY/IR108/BW', 'IR108'),
-    'dust': ('RGB/DUST', 'DUST')
+    'ir': 'IMAGERY/IR108/BW',
+    'dust': 'RGB/DUST'
 }
 
-# TODO: Measure opacity from the EUMETSAT image directly!
-IMAGE_URL = 'https://en.sat24.com/image?type=infraPolair&region=ce'
 IMAGE_QUERY_TIMEOUT = 5
 LOOP_DELAY = 300
+
+
+def scrape_latest_image(category):
+    """
+    Scrapes the EUMETSAT website to find the URL and date for the latest image
+        :param category: path component describing the requested image, e.g. IMAGERY/IR108/BW
+        :return: dictionary containing keys for 'date' and 'url' or None on error
+    """
+    source_url = SOURCE_URL_FORMAT.format(category)
+    r = requests.get(source_url, timeout=IMAGE_QUERY_TIMEOUT)
+    if r.status_code != 200:
+        print('Failed to scrape data for {0} (HTTP {1})'.format(category, r.status_code))
+        return None
+
+    id_search = re.search(r'array_nom_imagen\[0\]="(\w*)"', r.text)
+    label_search = re.search(r'\<option value="0"\>(.*)\<\/option\>', r.text)
+
+    if not id_search:
+        print('Failed to extract image id from html')
+        return None
+
+    if not label_search:
+        print('Failed to extract image label from html')
+        return None
+
+    try:
+        date = datetime.datetime.strptime(label_search.group(1), "%d/%m/%y %H:%M UTC")
+    except ValueError:
+        print('Failed to parse `{0}` as a date'.format(label_search.group(1)))
+        return None
+
+    return {
+        'url': source_url + 'IMAGESDisplay/' + id_search.group(1),
+        'date': date
+    }
+
+
+def fetch_and_crop_image(image_url):
+    """
+    Download the given EUMETSAT WESTERNAFRICA image and crop to focus on the Canary Islands
+        :param image_url: Image URL to download
+        :return PIL Image or None on error
+    """
+    r = requests.get(image_url, timeout=IMAGE_QUERY_TIMEOUT)
+    if r.status_code != 200:
+        print('Failed to fetch image `{0}` (HTTP {1})'.format(image_url, r.status_code))
+        return None
+
+    try:
+        source = Image.open(BytesIO(r.content))
+
+        # Cropy to the top-left corner containing the Canary Islands
+        cropped = source.crop((0, 0, 800, 650))
+
+        # Copy EUMETSAT watermark and metadata to bottom of cropped image
+        cropped.paste(source.crop((0, 1108, 260, 1148)), (0, 610, 260, 650))
+        cropped.paste(source.crop((908, 1108, 1448, 1148)), (260, 610, 800, 650))
+
+        return cropped
+    except Exception:
+        print('Failed to fetch image `{0}` with exception:'.format(image_url))
+        traceback.print_exc(file=sys.stdout)
+        return None
+
+
+def estimate_opacity(cropped_image):
+    """
+    Estimate the IR opacity in the area near La Palma
+    :param cropped_image: PIL Image returned by fetch_and_crop_image
+    :return: value between 0-100 percent or -1 on error
+    """
+    try:
+        measurement_image = np.array(cropped_image.crop((313, 270, 343, 300)).convert('L'))
+
+        # Mask out the island border annotations
+        valid = np.ones((30, 30), dtype=bool)
+        valid[9, 14:19] = False
+        valid[10, 12:14] = False
+        valid[11, 12] = False
+        valid[12, 11] = False
+        valid[13:16, 12] = False
+        valid[16:20, 13] = False
+        valid[20, 14:16] = False
+        valid[19, 16] = False
+        valid[17:19, 17] = False
+        valid[15:17, 18] = False
+        valid[10:15, 19] = False
+
+        return round(np.median(measurement_image[valid]) / 2.55)
+    except Exception:
+        print('Failed to estimate opacity with exception:')
+        traceback.print_exc(file=sys.stdout)
+        return -1
 
 
 class EumetsatDaemon:
     """Estimates the IR opacity from the Eumetsat image published by sat24.com"""
 
     def __init__(self):
-        self._time_regex = re.compile(r'(?P<hour>\d{2}):(?P<minutes>\d{2})')
-        self._binary_structure = generate_binary_structure(2, 1)
         self._lock = threading.Lock()
 
-        self._last_sha1 = None
-        self._last_measurement = 0
-        self._last_measurement_date = datetime.datetime.min
-
-        self._last_source_images = {s: '' for s in SOURCES}
+        self._opacity = 0
+        self._opacity_date = datetime.datetime.min
+        self._last_source_update = {s: datetime.datetime.min for s in SOURCES}
 
         runloop = threading.Thread(target=self.__poll_data)
         runloop.daemon = True
         runloop.start()
 
-    def __update_source_image(self, source):
-        """Check for a new satellite image/product and update the local cropped cache if it has changed
-            :param source: key to the SOURCES dictionary defining the image type
-        """
-        source_url = SOURCE_URL_FORMAT.format(SOURCES[source][0], SOURCES[source][1])
-        with urllib.request.urlopen(source_url) as url:
-            archive = zipfile.ZipFile(io.BytesIO((url.read())))
-            latest_filename = sorted(archive.namelist())[-1]
-            if latest_filename <= self._last_source_images[source]:
-                return
-
-            latest_image = Image.open(io.BytesIO(archive.read(latest_filename)))
-            crop = latest_image.crop((0, 0, 800, 650))
-
-            # Watermark
-            crop.paste(latest_image.crop((0, 1108, 260, 1148)), (0, 610, 260, 650))
-
-            # Data
-            crop.paste(latest_image.crop((908, 1108, 1448, 1148)), (260, 610, 800, 650))
-
-            output_path = SOURCE_OUTPUT_FORMAT.format(source)
-            crop.save(output_path, 'JPEG', quality=80, optimize=True, progressive=True, clobber=True)
-            self._last_source_images[source] = latest_filename
-
-    def __extract_datetime(self, image):
-        """Extract the time from a Sat24 image using OCR and estimate the date"""
-        # Extract thumbnail around the timestamp and convert to a binary mask to increase contrast
-        time_greyscale = np.mean(image[-29:-9, 125:177], axis=2)
-        time_binary = (time_greyscale > 192).astype(np.uint8)
-
-        # Extract the time using OCR
-        time_string = pytesseract.image_to_string(time_binary)
-
-        match = self._time_regex.match(time_string)
-        if not match:
-            print('Failed to parse time from extracted string:', time_string)
-            log.error('iropacityd', 'Failed to parse time from extracted string: ' + time_string)
-            return None
-
-        # Guess the date as today
-        now = datetime.datetime.utcnow()
-        date_string = now.strftime('%Y-%m-%d') + 'T{0}:{1}:00Z'.format(match.group('hour'),
-                                                                       match.group('minutes'))
-        date_estimate = datetime.datetime.strptime(date_string, '%Y-%m-%dT%H:%M:%SZ')
-
-        # Adjust date until the delta is less than half a day
-        while (date_estimate - now).total_seconds() > 43200:
-            date_estimate += datetime.timedelta(hours=24)
-
-        while (now - date_estimate).total_seconds() > 43200:
-            date_estimate -= datetime.timedelta(hours=24)
-
-        return date_estimate
-
-    def __update_measurement(self):
-        """Download the latest Sat24 image and update the opacity measurement if it has changed"""
-        with urllib.request.urlopen(IMAGE_URL) as url:
-            image = np.array(Image.open(io.BytesIO((url.read()))))
-            image_sha1 = hashlib.sha1(image).hexdigest()
-            if image_sha1 == self._last_sha1:
-                return
-
-            self._last_sha1 = image_sha1
-
-        date = self.__extract_datetime(image)
-        if date is None:
-            return
-
-        thumb = image[200:231, 303:334]
-
-        # Mask pixels with (or next to) large differences between the color channels
-        # Clouds are ~grey, coastline is strongly yellow
-        mask = binary_erosion(np.std(thumb, axis=2) < 20, structure=self._binary_structure)
-
-        # Convert to greyscale by averaging the color channels
-        thumb_grey = np.mean(thumb, axis=2)
-
-        with self._lock:
-            # Median intensity is normalized between 0 and 100 percent
-            self._last_measurement = round(np.median(thumb_grey[mask]) / 2.55)
-            self._last_measurement_date = date
-
     def __poll_data(self):
         """Main run loop"""
         while True:
-            try:
-                self.__update_measurement()
-            except Exception:
-                print('Failed to parse EUMETSAT image')
-                traceback.print_exc(file=sys.stdout)
-                log.error('iropacityd', 'Failed to parse EUMETSAT image')
-
             for s in SOURCES:
-                try:
-                    self.__update_source_image(s)
-                except Exception:
-                    print('Failed to parse EUMETSAT image for source', s)
-                    traceback.print_exc(file=sys.stdout)
-                    log.error('iropacityd', 'Failed to parse EUMETSAT image for source ' + s)
+                latest = scrape_latest_image(SOURCES[s])
+                if not latest or latest['date'] <= self._last_source_update[s]:
+                    continue
+
+                image = fetch_and_crop_image(latest['url'])
+                if not image:
+                    continue
+
+                image.save(SOURCE_OUTPUT_FORMAT.format(s), 'JPEG', quality=80,
+                           optimize=True, progressive=True, clobber=True)
+                self._last_source_update[s] = latest['date']
+
+                if s == 'ir':
+                    opacity = estimate_opacity(image)
+                    if opacity >= 0:
+                        with self._lock:
+                            self._opacity = opacity
+                            self._opacity_date = latest['date']
 
             time.sleep(LOOP_DELAY)
 
@@ -178,8 +184,8 @@ class EumetsatDaemon:
         """Query the latest valid measurement. May return None if no data is available"""
         with self._lock:
             return {
-                'date': self._last_measurement_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
-                'opacity': self._last_measurement,
+                'date': self._opacity_date.strftime('%Y-%m-%dT%H:%M:%SZ'),
+                'opacity': self._opacity,
                 'software_version': SOFTWARE_VERSION
             }
 
