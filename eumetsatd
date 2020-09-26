@@ -53,33 +53,38 @@ def scrape_latest_image(category):
         :param category: path component describing the requested image, e.g. IMAGERY/IR108/BW
         :return: dictionary containing keys for 'date' and 'url' or None on error
     """
-    source_url = SOURCE_URL_FORMAT.format(category)
-    r = requests.get(source_url, timeout=IMAGE_QUERY_TIMEOUT)
-    if r.status_code != 200:
-        print('Failed to scrape data for {0} (HTTP {1})'.format(category, r.status_code))
-        return None
-
-    id_search = re.search(r'array_nom_imagen\[0\]="(\w*)"', r.text)
-    label_search = re.search(r'\<option value="0"\>(.*)\<\/option\>', r.text)
-
-    if not id_search:
-        print('Failed to extract image id from html')
-        return None
-
-    if not label_search:
-        print('Failed to extract image label from html')
-        return None
-
     try:
-        date = datetime.datetime.strptime(label_search.group(1), "%d/%m/%y %H:%M UTC")
-    except ValueError:
-        print('Failed to parse `{0}` as a date'.format(label_search.group(1)))
-        return None
+        source_url = SOURCE_URL_FORMAT.format(category)
+        r = requests.get(source_url, timeout=IMAGE_QUERY_TIMEOUT)
+        if r.status_code != 200:
+            print('Failed to scrape data for {0} (HTTP {1})'.format(category, r.status_code))
+            return None
 
-    return {
-        'url': source_url + 'IMAGESDisplay/' + id_search.group(1),
-        'date': date
-    }
+        id_search = re.search(r'array_nom_imagen\[0\]="(\w*)"', r.text)
+        label_search = re.search(r'\<option value="0"\>(.*)\<\/option\>', r.text)
+
+        if not id_search:
+            print('Failed to extract image id from html')
+            return None
+
+        if not label_search:
+            print('Failed to extract image label from html')
+            return None
+
+        try:
+            date = datetime.datetime.strptime(label_search.group(1), "%d/%m/%y %H:%M UTC")
+        except ValueError:
+            print('Failed to parse `{0}` as a date'.format(label_search.group(1)))
+            return None
+
+        return {
+            'url': source_url + 'IMAGESDisplay/' + id_search.group(1),
+            'date': date
+        }
+    except Exception:
+        print('Failed to scrape image data with exception:')
+        traceback.print_exc(file=sys.stdout)
+        return None
 
 
 def fetch_and_crop_image(image_url):
@@ -88,12 +93,12 @@ def fetch_and_crop_image(image_url):
         :param image_url: Image URL to download
         :return PIL Image or None on error
     """
-    r = requests.get(image_url, timeout=IMAGE_QUERY_TIMEOUT)
-    if r.status_code != 200:
-        print('Failed to fetch image `{0}` (HTTP {1})'.format(image_url, r.status_code))
-        return None
-
     try:
+        r = requests.get(image_url, timeout=IMAGE_QUERY_TIMEOUT)
+        if r.status_code != 200:
+            print('Failed to fetch image `{0}` (HTTP {1})'.format(image_url, r.status_code))
+            return None
+
         source = Image.open(BytesIO(r.content))
 
         # Cropy to the top-left corner containing the Canary Islands
