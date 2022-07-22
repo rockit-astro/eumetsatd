@@ -1,17 +1,14 @@
 Name:      observatory-eumetsat-client
-Version:   1.1.1
+Version:   20220722
 Release:   0
 Url:       https://github.com/warwick-one-metre/eumetsatd
 Summary:   EUMETSAT client for the Warwick La Palma telescopes
 License:   GPL-3.0
 Group:     Unspecified
 BuildArch: noarch
-Requires:  python3, python3-Pyro4, python3-warwick-observatory-common
+Requires:  python3 python3-Pyro4 python3-warwick-observatory-common
 
 %description
-Part of the observatory software for the Warwick La Palma telescopes.
-
-eumetsat is a commandline utility that queries the EUMETSAT IR opacity daemon.
 
 %build
 mkdir -p %{buildroot}%{_bindir}
